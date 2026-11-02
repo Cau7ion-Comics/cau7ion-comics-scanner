@@ -1,0 +1,309 @@
+
+name: Build Cau7ion Comics Scanner
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get project
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Generate Android project
+        shell: bash
+        run: |
+          mkdir -p app/src/main/java/com/cau7ion/scanner
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "Cau7ionComicsScanner"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.cau7ion.scanner"
+              compileSdk = 35
+              defaultConfig {
+                  applicationId = "com.cau7ion.scanner"
+                  minSdk = 26
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
+              <application
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar"
+                  android:label="Cau7ion Comics Scanner"
+                  android:allowBackup="false">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".FloatingScannerService"
+                      android:exported="false"/>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/cau7ion/scanner/MainActivity.kt <<'EOF'
+          package com.cau7ion.scanner
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.graphics.Color
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  val layout = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER
+                      setPadding(32, 32, 32, 32)
+                      setBackgroundColor(Color.rgb(15, 15, 18))
+                  }
+
+                  val title = TextView(this).apply {
+                      text = "CAU7ION COMICS"
+                      textSize = 27f
+                      setTextColor(Color.rgb(220, 35, 45))
+                      gravity = Gravity.CENTER
+                  }
+
+                  val subtitle = TextView(this).apply {
+                      text = "FLOATING SCANNER  •  VERSION 1.0"
+                      textSize = 14f
+                      setTextColor(Color.WHITE)
+                      gravity = Gravity.CENTER
+                      setPadding(0, 18, 0, 28)
+                  }
+
+                  val status = TextView(this).apply {
+                      text = "Your scanner is ready to set up."
+                      textSize = 16f
+                      setTextColor(Color.WHITE)
+                      gravity = Gravity.CENTER
+                  }
+
+                  val button = Button(this).apply {
+                      text = "ENABLE FLOATING SCANNER"
+                      setOnClickListener {
+                          if (!Settings.canDrawOverlays(this@MainActivity)) {
+                              val intent = Intent(
+                                  Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                  Uri.parse("package:$packageName")
+                              )
+                              startActivity(intent)
+                          } else {
+                              startService(Intent(
+                                  this@MainActivity,
+                                  FloatingScannerService::class.java
+                              ))
+                              status.text = "Floating scanner enabled. Open Whatnot to test it."
+                          }
+                      }
+                  }
+
+                  layout.addView(title)
+                  layout.addView(subtitle)
+                  layout.addView(status)
+                  layout.addView(button)
+                  setContentView(layout)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  if (Settings.canDrawOverlays(this)) {
+                      startService(Intent(this, FloatingScannerService::class.java))
+                  }
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/cau7ion/scanner/FloatingScannerService.kt <<'EOF'
+          package com.cau7ion.scanner
+
+          import android.app.Service
+          import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.graphics.drawable.GradientDrawable
+          import android.os.IBinder
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.view.WindowManager
+          import android.view.MotionEvent
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class FloatingScannerService : Service() {
+              private var windowManager: WindowManager? = null
+              private var scannerButton: TextView? = null
+
+              override fun onStartCommand(
+                  intent: Intent?, flags: Int, startId: Int
+              ): Int {
+                  if (Settings.canDrawOverlays(this) && scannerButton == null) {
+                      showScanner()
+                  }
+                  return START_STICKY
+              }
+
+              private fun showScanner() {
+                  windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+
+                  val background = GradientDrawable().apply {
+                      setColor(Color.rgb(20, 20, 24))
+                      setStroke(4, Color.rgb(220, 35, 45))
+                      cornerRadius = 60f
+                  }
+
+                  val button = TextView(this).apply {
+                      text = "C7\nSCAN"
+                      textSize = 15f
+                      gravity = Gravity.CENTER
+                      setTextColor(Color.rgb(80, 230, 110))
+                      setPadding(18, 12, 18, 12)
+                      this.background = background
+                      elevation = 12f
+                      setOnClickListener {
+                          Toast.makeText(
+                              this@FloatingScannerService,
+                              "Scanner ready! Screen capture is our next build step.",
+                              Toast.LENGTH_LONG
+                          ).show()
+                      }
+                      setOnLongClickListener {
+                          stopSelf()
+                          true
+                      }
+                  }
+
+                  val params = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                      PixelFormat.TRANSLUCENT
+                  ).apply {
+                      gravity = Gravity.TOP or Gravity.END
+                      x = 24
+                      y = 260
+                  }
+
+                  button.setOnTouchListener { view, event ->
+                      if (event.action == MotionEvent.ACTION_DOWN) {
+                          view.tag = floatArrayOf(event.rawX, event.rawY,
+                              params.x.toFloat(), params.y.toFloat())
+                          true
+                      } else if (event.action == MotionEvent.ACTION_MOVE) {
+                          val start = view.tag as? FloatArray
+                          if (start != null) {
+                              params.x = (start[2] + start[0] - event.rawX).toInt()
+                              params.y = (start[3] + event.rawY - start[1]).toInt()
+                              windowManager?.updateViewLayout(view, params)
+                          }
+                          true
+                      } else {
+                          false
+                      }
+                  }
+
+                  scannerButton = button
+                  windowManager?.addView(button, params)
+              }
+
+              override fun onDestroy() {
+                  scannerButton?.let {
+                      windowManager?.removeView(it)
+                  }
+                  scannerButton = null
+                  super.onDestroy()
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+          }
+          EOF
+
+      - name: Build APK
+        run: gradle assembleDebug
+
+      - name: Save installable APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cau7ion-Comics-Scanner-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
